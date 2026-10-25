@@ -8,17 +8,25 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 
 if (process.platform !== 'win32' || process.env.GITHUB_ACTIONS !== 'true') throw Error('Use the disposable Windows CI runner for automatic-installation tests.');
 const directory = mkdtempSync(join(tmpdir(), 'financecheck-auto-update-'));
 const installDirectory = join(directory, 'installed');
-const dataDirectory = join(directory, 'user-data');
+// NSIS restarts via the Windows shell, so process-local environment overrides
+// are not inherited. Use the actual Windows profile on this disposable runner.
+const dataDirectory = join(process.env.APPDATA, 'FinanceCheck');
+const hadDataDirectory = existsSync(dataDirectory);
 const fixtureDirectory = join(directory, 'fixture-build');
 const version = JSON.parse(readFileSync('package.json', 'utf8')).version;
 const parts = version.split('.').map(Number); parts[2]++;
 const targetVersion = parts.join('.');
 const filename = `FinanceCheck-${targetVersion}-x64-setup.exe`;
 let application, server, restartedPid;
+let phase = 'build fixture';
+const execFileAsync = promisify(execFile);
 function run(executable, args, env = process.env) {
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, { stdio: 'inherit', env });
@@ -26,13 +34,13 @@ function run(executable, args, env = process.env) {
     child.once('exit', code => code === 0 ? resolve() : reject(Error(`${executable} exited ${code}`)));
   });
 }
-async function waitFor(check, timeout = 90000) {
+async function waitFor(check, label, timeout = 90000) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     const value = await check(); if (value) return value;
     await new Promise(resolve => setTimeout(resolve, 500));
   }
-  throw Error('Timed out waiting for automatic update and restart');
+  throw Error('Timed out waiting for ' + label);
 }
 async function close() { if (application) { await application.close(); application = undefined; } }
 try {
@@ -53,14 +61,27 @@ try {
     } else { res.statusCode = 404; res.end(); }
   }).listen(0, '127.0.0.1');
   await new Promise(resolve => server.once('listening', resolve));
-  const env = { ...process.env, FINANCECHECK_DESKTOP_TEST: '1', FINANCECHECK_DESKTOP_TEST_DIR: dataDirectory, FINANCECHECK_TEST_UPDATE_FEED: `http://127.0.0.1:${server.address().port}/updates/` };
+  const env = { ...process.env, FINANCECHECK_DESKTOP_TEST: '1', FINANCECHECK_TEST_UPDATE_FEED: `http://127.0.0.1:${server.address().port}/updates/` };
   delete env.ELECTRON_RUN_AS_NODE;
+  delete env.FINANCECHECK_DESKTOP_TEST_DIR;
+  phase = 'install bootstrap';
   await run(resolve(`release/FinanceCheck-${version}-x64-setup.exe`), ['/S', '/D=' + installDirectory]);
   async function launch() {
     application = await electron.launch({ executablePath: join(installDirectory, 'FinanceCheck.exe'), args: [], env, timeout: 45000 });
     const page = await application.firstWindow(); await page.getByRole('heading', { level: 1 }).waitFor(); return page;
   }
   let page = await launch();
+  const actualDataPath = await application.evaluate(({ app }) => app.getPath('userData'));
+  assert.equal(actualDataPath.toLowerCase(), dataDirectory.toLowerCase());
+  assert.equal((await page.evaluate(() => window.financecheckDesktop.getUpdateState())).supported, true);
+  const initial = await page.evaluate(async () => (await fetch('/api/state')).json());
+  assert.equal(initial.profile.name, '', 'Do not overwrite a pre-existing profile');
+  assert.equal(initial.transactions.length, 0);
+  assert.equal(initial.debts.length, 0);
+  assert.equal(initial.profile.initialBalance, 0);
+  assert.equal(initial.profile.reserveBalance, 0);
+  assert.equal(Object.keys(initial.monthlyPlans).length, 0);
+  phase = 'seed isolated CI profile';
   const before = await page.evaluate(async () => {
     const state = await (await fetch('/api/state')).json();
     const post = (path, method, body) => fetch('/api' + path, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(response => { if (!response.ok) throw Error(path); return response.json(); });
@@ -72,17 +93,20 @@ try {
     return result;
   });
   const encryptedKey = readFileSync(join(dataDirectory, 'ai-key.bin'));
+  phase = 'reject corrupt SHA512';
   await page.getByRole('button', { name: 'Настройки', exact: true }).click();
   await page.getByRole('button', { name: 'Проверить обновления', exact: true }).click();
-  await waitFor(async () => (await page.evaluate(() => window.financecheckDesktop.getUpdateState())).status === 'error');
+  await waitFor(async () => (await page.evaluate(() => window.financecheckDesktop.getUpdateState())).status === 'error', 'corrupt installer rejection');
   assert.equal(await page.evaluate(() => window.financecheckDesktop.getVersion()), version);
   assert.equal((await page.evaluate(() => window.financecheckDesktop.getUpdateState())).status, 'error', 'Corrupt installer must never be ready');
   console.log('Automatic update: corrupt SHA512 was rejected.');
   corrupt = false;
+  phase = 'download verified update';
   await page.evaluate(() => window.financecheckDesktop.checkForUpdates());
-  await waitFor(async () => (await page.evaluate(() => window.financecheckDesktop.getUpdateState())).status === 'ready');
+  await waitFor(async () => (await page.evaluate(() => window.financecheckDesktop.getUpdateState())).status === 'ready', 'verified download');
   await close();
   page = await launch();
+  phase = 'verify ordinary quit and canceled confirmation';
   assert.equal(await page.evaluate(() => window.financecheckDesktop.getVersion()), version, 'Closing without confirmation must not install');
   await page.evaluate(() => window.financecheckDesktop.checkForUpdates());
   assert.equal((await page.evaluate(() => window.financecheckDesktop.getUpdateState())).status, 'ready');
@@ -90,16 +114,26 @@ try {
   await page.evaluate(() => window.financecheckDesktop.installUpdate());
   assert.equal(await page.evaluate(() => window.financecheckDesktop.getVersion()), version, 'Cancel must leave current app running');
   await application.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 1 }); });
+  phase = 'install and observe Windows-shell restart';
   const closed = application.waitForEvent('close', { timeout: 45000 });
   void page.evaluate(() => window.financecheckDesktop.installUpdate()).catch(() => {});
   await closed; application = undefined;
-  const ready = await waitFor(() => {
-    try { const marker = JSON.parse(readFileSync(join(dataDirectory, 'test-ready.json'), 'utf8')); return marker.version === targetVersion ? marker : null; } catch { return null; }
-  });
-  assert.equal(ready.executable.toLowerCase(), join(installDirectory, 'FinanceCheck.exe').toLowerCase());
-  assert.ok(Number.isInteger(ready.pid) && ready.pid > 0 && ready.pid !== process.pid);
-  restartedPid = ready.pid;
-  await run('taskkill', ['/PID', String(restartedPid), '/T', '/F']); restartedPid = undefined;
+  const observed = await waitFor(async () => {
+    let db;
+    try {
+      db = new DatabaseSync(join(dataDirectory, 'financecheck.sqlite'), { readOnly: true });
+      if (JSON.parse(db.prepare('SELECT body FROM state WHERE id=1').get().body).appVersion !== targetVersion) return null;
+    } catch { return null; } finally { db?.close(); }
+    const script = "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $env:FINANCECHECK_AUTO_TEST_EXE -and $_.CommandLine -notmatch '--type=' } | ForEach-Object { $p = Get-Process -Id $_.ProcessId; if ($p.MainWindowHandle -ne 0) { $p.Id } } | ConvertTo-Json -Compress";
+    const { stdout } = await execFileAsync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], { env: { ...process.env, FINANCECHECK_AUTO_TEST_EXE: join(installDirectory, 'FinanceCheck.exe') } });
+    if (!stdout.trim()) return null;
+    const pids = JSON.parse(stdout); return Array.isArray(pids) ? pids[0] : pids;
+  }, 'new version with an actual visible Windows window');
+  assert.ok(Number.isInteger(observed) && observed > 0 && observed !== process.pid);
+  restartedPid = observed;
+  await execFileAsync('powershell', ['-NoProfile', '-NonInteractive', '-Command', '$p = Get-Process -Id $env:FINANCECHECK_AUTO_TEST_PID; $null = $p.CloseMainWindow(); if (-not $p.WaitForExit(10000)) { throw "Test window did not close" }'], { env: { ...process.env, FINANCECHECK_AUTO_TEST_PID: String(restartedPid) } });
+  restartedPid = undefined;
+  phase = 'verify preserved data and credentials';
   page = await launch();
   assert.equal(await page.evaluate(() => window.financecheckDesktop.getVersion()), targetVersion);
   const after = await page.evaluate(async () => (await fetch('/api/state')).json());
@@ -111,6 +145,10 @@ try {
   assert.ok(backups.some(name => name.includes('before-update')));
   assert.ok(backups.some(name => name.includes('before-upgrade')));
   console.log(`Windows automatic update PASS: ${version} -> ${targetVersion}, real downloaded installer, canceled confirmation respected, restart observed, all financial data and DPAPI key preserved.`);
+} catch (error) {
+  const details = `${phase}: ${error.stack || error}`.replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A');
+  console.error('::error title=Automatic update validation::' + details);
+  throw error;
 } finally {
   await close();
   if (restartedPid) await run('taskkill', ['/PID', String(restartedPid), '/T', '/F']).catch(() => {});
@@ -119,5 +157,6 @@ try {
     if (uninstaller) await run(join(installDirectory, uninstaller), ['/S', '_?=' + installDirectory]);
   }
   if (server) { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); }
+  if (!hadDataDirectory) rmSync(dataDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 });
   rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 });
 }

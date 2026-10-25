@@ -2,7 +2,6 @@ import { app, BrowserWindow, Menu, dialog, ipcMain, safeStorage, shell, session 
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
-import { writeFileSync } from 'node:fs';
 import { createStore } from '../server/store.mjs';
 import { createApp } from '../server/app.mjs';
 import { createDesktopSettings } from './settings.mjs';
@@ -78,7 +77,6 @@ else {
     ]));
     mainWindow.once('ready-to-show', () => mainWindow.show());
     await mainWindow.loadURL(origin);
-    if (testMode && app.isPackaged) writeFileSync(join(directory, 'test-ready.json'), JSON.stringify({ pid: process.pid, version: app.getVersion(), executable: process.execPath }));
     if (updateSupported && !testMode) {
       updateTimer = setTimeout(() => { void updates.check(); }, 15000);
       updateInterval = setInterval(() => { void updates.check(); }, 6 * 60 * 60 * 1000);
