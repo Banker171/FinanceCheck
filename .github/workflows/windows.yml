@@ -22,6 +22,8 @@ jobs:
       - run: npm run dist:win
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Verify installation upgrade preserves existing data
+        run: npm run test:upgrade
       - name: Checksums
         shell: pwsh
         run: |

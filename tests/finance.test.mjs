@@ -4,7 +4,7 @@ import { analyze, project, dateAtDay, defaultProfile } from '../server/finance.m
 
 const profile = overrides => ({ ...defaultProfile, monthlyIncome: 10000, essentials: 4000, initialBalance: 10000, ...overrides });
 const debt = overrides => ({ id: 'd1', name: 'Кредит', balance: 12000, apr: 0, payment: 1000, dueDay: 15, ...overrides });
-const state = (p, debts = [], transactions = []) => ({ profile: p, debts, transactions });
+const state = (p, debts = [], transactions = []) => ({ profile: p, debts, transactions, monthlyPlans: { '2026-10': { income: p.monthlyIncome, payday: p.payday ?? 10 } } });
 
 test('zero interest debt is repaid exactly with monthly allocations conserved', () => {
   const result = project(profile({ reserveMonths: 1 }), [debt()]);
@@ -58,11 +58,14 @@ test('income and expenses change cash, reserve allocation is not an expense', ()
   assert.equal(a.monthExpense, 2000);
   assert.equal(a.reserveDays, 22);
 });
-test('calendar clamps dates in short months and moves to next month on payday', () => {
+test('calendar clamps dates and never invents income for an unfilled month', () => {
   assert.equal(dateAtDay(2026, 1, 31).toISOString().slice(0, 10), '2026-02-28');
   assert.equal(dateAtDay(2028, 1, 31).toISOString().slice(0, 10), '2028-02-29');
-  const a = analyze(state(profile({ payday: 31 })), new Date('2026-02-28T09:00:00Z'));
-  assert.equal(a.nextIncome, '2026-03-31');
+  const s = state(profile());
+  s.monthlyPlans = { '2026-02': { income: 10000, payday: 31 } };
+  const a = analyze(s, new Date('2026-02-28T09:00:00Z'));
+  assert.equal(a.nextIncome, '2026-02-28');
+  assert.equal(a.events.some(e => e.type === 'income' && e.date.startsWith('2026-03')), false);
 });
 test('partial debt payment is not subtracted twice from current balance', () => {
   const a = analyze(state(profile({ payday: 28 }), [debt({ balance: 50, payment: 100, dueDay: 27 })], [
@@ -92,4 +95,41 @@ test('completed goals leave the monthly surplus unallocated', () => {
   const result = project(profile({ reserveBalance: 12000 }), []);
   assert.equal(result.firstAllocation.unallocated, 6000);
   assert.equal(result.months, 0);
+});
+test('actual income reduces remaining scheduled income and is not added to the plan', () => {
+  const s = state(profile({ initialBalance: 5000, monthlyIncome: 50000, payday: 28 }), [], [
+    { type: 'income', amount: 20000, date: '2026-10-10', category: 'Зарплата' },
+  ]);
+  const a = analyze(s, new Date('2026-10-25T12:00:00Z'));
+  assert.equal(a.plannedIncome, 50000);
+  assert.equal(a.totalBalance, 25000);
+  assert.equal(a.events.find(e => e.type === 'income').amount, 30000);
+  assert.equal(a.nextIncome, '2026-10-28');
+});
+test('a new month stays unset instead of copying the previous income or treating it as zero', () => {
+  const a = analyze(state(profile()), new Date('2026-11-01T00:00:00Z'));
+  assert.equal(a.plannedIncome, null);
+  assert.equal(a.surplus, null);
+  assert.equal(a.forecast.reason, 'missing-income');
+  assert.equal(a.nextIncome, null);
+  assert.equal(a.dailyBudget, null);
+});
+test('known monthly income changes are used and projections stop at the first gap', () => {
+  const s = state(profile(), [debt()]);
+  s.monthlyPlans['2026-11'] = { income: 5000, payday: 10 };
+  let a = analyze(s, new Date('2026-10-01T00:00:00Z'));
+  assert.equal(a.forecast.months, 2);
+  assert.equal(a.forecast.reason, 'missing-income');
+  assert.equal(a.forecast.points.at(-1).debt, 7000);
+  s.monthlyPlans['2026-11'].income = 20000;
+  a = analyze(s, new Date('2026-10-01T00:00:00Z'));
+  assert.equal(a.forecast.debtFreeMonth, 2);
+  assert.equal(a.forecast.points.at(-1).debt, 0);
+});
+test('zero surplus in one known month does not hide a later larger income', () => {
+  const p = profile();
+  const s = state(p);
+  s.monthlyPlans = { '2026-10': { income: 4000, payday: 10 }, '2026-11': { income: 20000, payday: 10 } };
+  const a = analyze(s, new Date('2026-10-01T00:00:00Z'));
+  assert.equal(a.forecast.reserveReadyMonth, 2);
 });

@@ -1,25 +1,58 @@
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { defaultProfile, round } from './finance.mjs';
+import { emptyState, migrateState, monthKey } from './state.mjs';
 
-export function createStore(path) {
+export function createStore(path, { now = new Date(), appVersion } = {}) {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
   const db = new DatabaseSync(path);
   db.exec('PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK (id = 1), body TEXT NOT NULL)');
-  const empty = () => ({ profile: { ...defaultProfile }, debts: [], transactions: [] });
+  const empty = () => ({ ...emptyState(), ...(appVersion ? { appVersion } : {}) });
   if (!db.prepare('SELECT id FROM state WHERE id=1').get()) db.prepare('INSERT INTO state VALUES (1, ?)').run(JSON.stringify(empty()));
   const read = () => JSON.parse(db.prepare('SELECT body FROM state WHERE id=1').get().body);
   const write = state => db.prepare('UPDATE state SET body=? WHERE id=1').run(JSON.stringify(state));
-  return { db, read, write, empty, id: randomUUID };
+  const backup = (reason, state = read()) => {
+    if (path === ':memory:') return null;
+    const directory = join(dirname(path), 'backups');
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const name = `${new Date().toISOString().replace(/[:.]/g, '-')}-${reason}-${randomUUID()}.json`;
+    writeFileSync(join(directory, name), JSON.stringify({ version: 1, exportedAt: new Date().toISOString(), ...state }, null, 2), { flag: 'wx', mode: 0o600 });
+    return name;
+  };
+  try {
+    db.exec('BEGIN IMMEDIATE');
+    const original = read();
+    const state = migrateState(original, now);
+    if (original.schemaVersion !== state.schemaVersion || (appVersion && original.appVersion !== appVersion)) {
+      // A JSON snapshot includes the entire single-row application state, including data still in WAL.
+      // If the backup cannot be written, rollback rather than upgrade without a recoverable copy.
+      backup('before-upgrade', original);
+      if (appVersion) state.appVersion = appVersion;
+      write(state);
+    }
+    db.exec('COMMIT');
+  } catch (error) { db.exec('ROLLBACK'); db.close(); throw error; }
+  const replace = state => {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      backup('before-restore');
+      if (appVersion) state.appVersion = appVersion;
+      write(state);
+      db.exec('COMMIT');
+    } catch (error) { db.exec('ROLLBACK'); throw error; }
+  };
+  return { db, read, write, empty, backup, replace, id: randomUUID };
 }
 
 export function demoState(now = new Date()) {
   const year = now.getUTCFullYear(), month = now.getUTCMonth();
   const date = day => new Date(Date.UTC(year, month, Math.min(day, now.getUTCDate()))).toISOString().slice(0, 10);
   return {
-    profile: { ...defaultProfile, name: 'Александр', monthlyIncome: 95000, essentials: 43000, initialBalance: 48500, reserveBalance: 25000, payday: 28 },
+    schemaVersion: 2,
+    profile: { ...defaultProfile, name: 'Александр', essentials: 43000, initialBalance: 48500, reserveBalance: 25000 },
+    monthlyPlans: { [monthKey(now)]: { income: 95000, payday: 28 } },
     debts: [
       { id: 'demo-credit', name: 'Потребительский кредит', balance: 245000, apr: 24.9, payment: 12500, dueDay: 27 },
       { id: 'demo-card', name: 'Кредитная карта', balance: 68000, apr: 39.9, payment: 4500, dueDay: 30 },
@@ -38,15 +71,41 @@ export function demoState(now = new Date()) {
 export function validateProfile(body) {
   const p = { ...body };
   if (typeof p.name !== 'string' || p.name.length > 80) throw Error('Имя: не более 80 символов.');
-  for (const key of ['monthlyIncome', 'essentials', 'initialBalance', 'reserveBalance']) {
+  for (const key of ['essentials', 'initialBalance', 'reserveBalance']) {
     if (!Number.isFinite(p[key]) || p[key] < 0 || p[key] > 1e9) throw Error('Суммы должны быть от 0 до 1 млрд ₽.');
     p[key] = round(p[key]);
   }
-  if (!Number.isInteger(p.payday) || p.payday < 1 || p.payday > 31) throw Error('День дохода должен быть от 1 до 31.');
   if (!Number.isInteger(p.reserveMonths) || p.reserveMonths < 1 || p.reserveMonths > 24) throw Error('Цель подушки: от 1 до 24 месяцев.');
   if (!['debt', 'balanced', 'reserve'].includes(p.strategy)) throw Error('Неизвестный сценарий.');
   if (!['avalanche', 'snowball'].includes(p.method)) throw Error('Неизвестный метод погашения.');
   return Object.fromEntries(Object.keys(defaultProfile).map(k => [k, p[k]]));
+}
+
+export function validateMonthPlan(month, body) {
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw Error('Некорректный месяц.');
+  if (!Number.isFinite(body.income) || body.income < 0 || body.income > 1e9) throw Error('Суммы дохода должны быть от 0 до 1 млрд ₽.');
+  if (!Number.isInteger(body.payday) || body.payday < 1 || body.payday > 31) throw Error('День дохода должен быть от 1 до 31.');
+  return { income: round(body.income), payday: body.payday };
+}
+
+export function validateImport(input) {
+  if (!input || input.version !== 1) throw Error('Некорректный файл: используйте JSON-экспорт FinanceCheck.');
+  const state = migrateState(input);
+  state.profile = validateProfile(state.profile);
+  if (state.debts.length > 200 || state.transactions.length > 10000 || Object.keys(state.monthlyPlans).length > 2400) throw Error('Слишком много записей в файле.');
+  const ids = new Set();
+  const id = value => {
+    if (typeof value !== 'string' || !/^[a-zA-Z0-9._:-]{1,100}$/.test(value) || ids.has(value)) throw Error('Некорректные или повторяющиеся идентификаторы в файле.');
+    ids.add(value); return value;
+  };
+  state.monthlyPlans = Object.fromEntries(Object.entries(state.monthlyPlans).map(([month, plan]) => [month, validateMonthPlan(month, plan)]));
+  state.debts = state.debts.map(d => ({ id: id(d.id), ...validateDebt(d) }));
+  // Historical principal is checked against the payment, not today's already-reduced debt balance.
+  const historical = { debts: state.debts.map(d => ({ ...d, balance: 1e9 })) };
+  state.transactions = state.transactions.map(t => ({ id: id(t.id), ...validateTransaction(t, historical), ...(t.principalReconciled === true ? { principalReconciled: true } : {}) }));
+  delete state.version;
+  delete state.exportedAt;
+  return state;
 }
 
 export function validateDebt(b) {

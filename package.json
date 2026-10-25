@@ -1,6 +1,6 @@
 {
   "name": "financecheck",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -14,7 +14,8 @@
     "dist:win": "npm run build && electron-builder --win --x64 --publish never",
     "dist:dir": "npm run build && electron-builder --dir --publish never",
     "test:desktop": "node --test tests/desktop.test.mjs",
-    "test:electron": "npm run build && node scripts/test-electron.mjs"
+    "test:electron": "npm run build && node scripts/test-electron.mjs",
+    "test:upgrade": "node scripts/test-upgrade.mjs"
   },
   "dependencies": {
     "express": "^5.1.0",

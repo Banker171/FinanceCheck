@@ -31,7 +31,8 @@ try {
   assert.deepEqual(preferences, { sandbox: true, contextIsolation: true, nodeIntegration: false });
   const saved = await page.evaluate(async () => {
     const state = await (await fetch('/api/state')).json();
-    const response = await fetch('/api/profile', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...state.profile, name: 'Проверка Windows', monthlyIncome: 90000, essentials: 40000, initialBalance: 25000 }) });
+    const response = await fetch('/api/profile', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...state.profile, name: 'Проверка Windows', essentials: 40000, initialBalance: 25000 }) });
+    await fetch('/api/monthly-plans/' + state.analysis.currentMonth, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ income: 90000, payday: 20 }) });
     return { status: response.status, data: await response.json() };
   });
   assert.equal(saved.status, 200);
@@ -46,7 +47,7 @@ try {
   page = await application.firstWindow();
   await page.getByRole('heading', { level: 1 }).waitFor();
   assert.match(await page.getByRole('heading', { level: 1 }).innerText(), /Проверка Windows/);
-  assert.equal((await page.evaluate(async () => (await (await fetch('/api/state')).json()).profile.monthlyIncome)), 90000);
+  assert.equal((await page.evaluate(async () => (await (await fetch('/api/state')).json()).analysis.plannedIncome)), 90000);
   console.log('Electron PASS: window, sandbox, preload IPC, private API, settings screen, local data persistence across restart.');
 } finally {
   if (application) await application.close();

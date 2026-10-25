@@ -21,7 +21,7 @@ async function fixture(t, options = {}) {
 test('profile, debt payment split, deletion, export and reset work through HTTP', async t => {
   const { call } = await fixture(t);
   let { data } = await call('/state');
-  assert.equal(data.profile.monthlyIncome, 0);
+  assert.equal(data.analysis.plannedIncome, null);
   let r = await call('/profile', 'PUT', { ...data.profile, monthlyIncome: 50000, essentials: 20000, initialBalance: 20000, reserveBalance: 5000 });
   assert.equal(r.status, 200);
   r = await call('/debts', 'POST', { name: 'Банк', balance: 10000, apr: 12, payment: 1000, dueDay: 28 });
@@ -41,12 +41,12 @@ test('profile, debt payment split, deletion, export and reset work through HTTP'
   assert.equal((await call('/reset', 'POST', {})).status, 400);
   r = await call('/reset', 'POST', { confirm: 'УДАЛИТЬ' });
   assert.equal(r.data.debts.length, 0);
-  assert.equal(r.data.profile.monthlyIncome, 0);
+  assert.equal(r.data.analysis.plannedIncome, null);
 });
 test('reject invalid money, invalid date, future operations and impossible principal', async t => {
   const { call } = await fixture(t);
   const { data } = await call('/state');
-  assert.equal((await call('/profile', 'PUT', { ...data.profile, monthlyIncome: -1 })).status, 400);
+  assert.equal((await call('/profile', 'PUT', { ...data.profile, essentials: -1 })).status, 400);
   assert.equal((await call('/profile', 'PUT', { ...data.profile, strategy: 'unknown' })).status, 400);
   const debt = await call('/debts', 'POST', { name: 'Кредит', balance: 100, apr: 0, payment: 10, dueDay: 31 });
   const tx = { type: 'expense', amount: 10, principal: 0, date: '2026-02-30', category: 'Продукты', note: '' };
@@ -140,13 +140,14 @@ test('SQLite data survives closing and reopening the database', () => {
 test('what-if calculations do not change the saved profile', async t => {
   const { call } = await fixture(t);
   const original = (await call('/state')).data;
-  await call('/profile', 'PUT', { ...original.profile, monthlyIncome: 50000, essentials: 20000 });
+  await call('/profile', 'PUT', { ...original.profile, essentials: 20000 });
+  await call('/monthly-plans/' + original.analysis.currentMonth, 'PUT', { income: 50000, payday: 15 });
   const scenario = await call('/scenario', 'POST', { monthlyIncome: 40000, essentials: 15000 });
   assert.equal(scenario.status, 200);
   assert.equal(scenario.data.surplus, 25000);
   assert.equal(scenario.data.scenarios.length, 3);
   const after = (await call('/state')).data;
-  assert.equal(after.profile.monthlyIncome, 50000);
+  assert.equal(after.analysis.plannedIncome, 50000);
   assert.equal(after.profile.essentials, 20000);
   assert.equal((await call('/scenario', 'POST', { monthlyIncome: -1, essentials: 0 })).status, 400);
 });
@@ -167,4 +168,41 @@ test('desktop API requires its private session token and can refresh AI config',
   assert.equal(data.ai.enabled, true);
   assert.equal(data.ai.model, 'changed-model');
   assert.equal(JSON.stringify(data).includes('test-only'), false);
+});
+test('monthly incomes are independent, zero is explicit, and plan edits never credit cash', async t => {
+  const { call } = await fixture(t);
+  let r = await call('/monthly-plans/2026-10', 'PUT', { income: 100000, payday: 28 });
+  assert.equal(r.status, 200);
+  r = await call('/monthly-plans/2026-11', 'PUT', { income: 60000, payday: 15 });
+  assert.equal(r.data.monthlyPlans['2026-10'].income, 100000);
+  assert.equal(r.data.monthlyPlans['2026-11'].income, 60000);
+  assert.equal(r.data.analysis.totalBalance, 0);
+  r = await call('/monthly-plans/2026-12', 'PUT', { income: 0, payday: 1 });
+  assert.equal(r.data.monthlyPlans['2026-12'].income, 0);
+  r = await call('/monthly-plans/2026-11', 'DELETE', {});
+  assert.equal(r.data.monthlyPlans['2026-11'], undefined);
+  assert.equal(r.data.monthlyPlans['2026-10'].income, 100000);
+  for (const [month, body] of [['2026-13', { income: 1, payday: 1 }], ['2026-10', { income: -1, payday: 1 }], ['2026-10', { income: 1, payday: 32 }]]) assert.equal((await call('/monthly-plans/' + month, 'PUT', body)).status, 400);
+});
+test('export restores a complete profile and monthly history without replaying payments', async t => {
+  const { call } = await fixture(t);
+  await call('/demo', 'POST', {});
+  await call('/monthly-plans/2026-12', 'PUT', { income: 0, payday: 5 });
+  const original = (await call('/export')).data;
+  await call('/reset', 'POST', { confirm: 'УДАЛИТЬ' });
+  assert.equal((await call('/import', 'POST', { payload: original })).status, 400);
+  const restored = await call('/import', 'POST', { payload: original, confirm: 'ВОССТАНОВИТЬ' });
+  assert.equal(restored.status, 200);
+  for (const key of ['profile', 'debts', 'transactions', 'monthlyPlans']) assert.deepEqual(restored.data[key], original[key]);
+});
+test('invalid imports leave all existing financial data unchanged', async t => {
+  const { call } = await fixture(t);
+  await call('/demo', 'POST', {});
+  const original = (await call('/export')).data;
+  const invalid = structuredClone(original); invalid.transactions[0].amount = -1;
+  assert.equal((await call('/import', 'POST', { payload: invalid, confirm: 'ВОССТАНОВИТЬ' })).status, 400);
+  invalid.transactions = [...original.transactions, original.transactions[0]];
+  assert.equal((await call('/import', 'POST', { payload: invalid, confirm: 'ВОССТАНОВИТЬ' })).status, 400);
+  const after = (await call('/export')).data;
+  for (const key of ['profile', 'debts', 'transactions', 'monthlyPlans']) assert.deepEqual(after[key], original[key]);
 });

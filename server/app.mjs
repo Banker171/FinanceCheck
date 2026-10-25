@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { existsSync } from 'node:fs';
 import { timingSafeEqual } from 'node:crypto';
 import { analyze, localAdvice, round } from './finance.mjs';
-import { validateProfile, validateDebt, validateTransaction, demoState } from './store.mjs';
+import { validateProfile, validateDebt, validateTransaction, demoState, validateMonthPlan, validateImport } from './store.mjs';
 
 export function createApp(store, { aiKey = '', aiModel = 'gpt-4.1-mini', getAiConfig, fetchImpl = fetch, staticDir = resolve('dist'), authToken = '' } = {}) {
   const app = express();
@@ -27,7 +27,7 @@ export function createApp(store, { aiKey = '', aiModel = 'gpt-4.1-mini', getAiCo
     }
     next();
   });
-  app.use(express.json({ limit: '256kb' }));
+  app.use(express.json({ limit: '5mb' }));
   app.use((req, res, next) => {
     if (['POST', 'PUT', 'DELETE'].includes(req.method) && (!req.body || typeof req.body !== 'object' || Array.isArray(req.body))) return res.status(400).json({ error: 'Ожидается объект JSON.' });
     next();
@@ -38,9 +38,20 @@ export function createApp(store, { aiKey = '', aiModel = 'gpt-4.1-mini', getAiCo
   app.get('/api/state', (_req, res) => res.json(response()));
   app.post('/api/scenario', (req, res) => {
     const state = store.read();
-    state.profile = validateProfile({ ...state.profile, monthlyIncome: req.body.monthlyIncome, essentials: req.body.essentials });
-    const result = analyze(state);
-    res.json({ scenarios: result.scenarios, surplus: result.surplus });
+    const income = validateMonthPlan('2000-01', { income: req.body.monthlyIncome, payday: 1 }).income;
+    state.profile = validateProfile({ ...state.profile, essentials: req.body.essentials });
+    const result = analyze(state, new Date(), { hypotheticalIncome: income });
+    res.json({ scenarios: result.scenarios, surplus: round(income - state.profile.essentials - result.minimumPayments) });
+  });
+  app.put('/api/monthly-plans/:month', (req, res) => {
+    const state = store.read();
+    state.monthlyPlans[req.params.month] = validateMonthPlan(req.params.month, req.body);
+    store.write(state); res.json(response());
+  });
+  app.delete('/api/monthly-plans/:month', (req, res) => {
+    validateMonthPlan(req.params.month, { income: 0, payday: 1 });
+    const state = store.read(); delete state.monthlyPlans[req.params.month];
+    store.write(state); res.json(response());
   });
   app.put('/api/profile', (req, res) => {
     const state = store.read();
@@ -88,7 +99,7 @@ export function createApp(store, { aiKey = '', aiModel = 'gpt-4.1-mini', getAiCo
   });
   app.post('/api/demo', (_req, res) => {
     const state = store.read();
-    if (state.transactions.length || state.debts.length || state.profile.monthlyIncome || state.profile.initialBalance || state.profile.reserveBalance || state.profile.essentials || state.profile.name) return res.status(409).json({ error: 'Демо можно загрузить только в пустой профиль. Сначала экспортируйте и удалите текущие данные.' });
+    if (state.transactions.length || state.debts.length || Object.keys(state.monthlyPlans).length || state.profile.initialBalance || state.profile.reserveBalance || state.profile.essentials || state.profile.name) return res.status(409).json({ error: 'Демо можно загрузить только в пустой профиль. Сначала экспортируйте и удалите текущие данные.' });
     store.write(demoState()); res.json(response());
   });
   app.post('/api/reset', (req, res) => {
@@ -98,6 +109,14 @@ export function createApp(store, { aiKey = '', aiModel = 'gpt-4.1-mini', getAiCo
   app.get('/api/export', (_req, res) => {
     res.setHeader('Content-Disposition', 'attachment; filename="financecheck-export.json"');
     res.json({ version: 1, exportedAt: new Date().toISOString(), ...store.read() });
+  });
+  app.post('/api/import', (req, res) => {
+    if (req.body.confirm !== 'ВОССТАНОВИТЬ') return res.status(400).json({ error: 'Подтвердите восстановление словом ВОССТАНОВИТЬ.' });
+    let imported;
+    try { imported = validateImport(req.body.payload); }
+    catch { return res.status(400).json({ error: 'Некорректный файл FinanceCheck. Проверьте версию, суммы, даты и связи операций с долгами. Текущие данные не изменены.' }); }
+    store.replace(imported);
+    res.json(response());
   });
   let aiBusy = false;
   let lastAiCall = 0;
@@ -111,7 +130,7 @@ export function createApp(store, { aiKey = '', aiModel = 'gpt-4.1-mini', getAiCo
     aiBusy = true; lastAiCall = Date.now();
     // No transaction notes, account names, names of creditors or user name are sent.
     const summary = {
-      monthlyIncome: state.profile.monthlyIncome, essentials: state.profile.essentials,
+      incomeMonth: analysis.currentMonth, incomeForMonth: analysis.plannedIncome, essentials: state.profile.essentials,
       totalBalance: analysis.totalBalance, reserveBalance: state.profile.reserveBalance,
       reserveTarget: analysis.reserveTarget, reserveDays: analysis.reserveDays,
       debtTotal: analysis.debtTotal, minimumPayments: analysis.minimumPayments,
@@ -147,7 +166,7 @@ export function createApp(store, { aiKey = '', aiModel = 'gpt-4.1-mini', getAiCo
   app.use((err, _req, res, _next) => {
     if (err instanceof SyntaxError || err.type === 'entity.too.large') return res.status(400).json({ error: 'Некорректный или слишком большой запрос.' });
     // Validation errors contain fixed application messages, never raw provider or database errors.
-    const safe = /^(Имя:|Суммы |День |Цель |Неизвестн|Укажите |Проверьте |Платеж |Погашение |Некорректная дата|Для будущих|Сумма операции|Минимальная сумма)/.test(err.message || '');
+    const safe = /^(Имя:|Суммы |День |Цель |Неизвестн|Укажите |Проверьте |Платеж |Погашение |Некорректн|Для будущих|Сумма операции|Минимальная сумма)/.test(err.message || '');
     res.status(safe ? 400 : 500).json({ error: safe ? err.message : 'Не удалось выполнить действие.' });
   });
   return app;

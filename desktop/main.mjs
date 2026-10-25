@@ -19,7 +19,7 @@ else {
   app.on('second-instance', () => { if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.show(); mainWindow.focus(); } });
   app.whenReady().then(async () => {
     const directory = app.getPath('userData');
-    store = createStore(join(directory, 'financecheck.sqlite'));
+    store = createStore(join(directory, 'financecheck.sqlite'), { appVersion: app.getVersion() });
     const settings = createDesktopSettings(directory, safeStorage);
     const api = createApp(store, { staticDir: join(app.getAppPath(), 'dist'), authToken: token, getAiConfig: settings.config });
     server = api.listen(0, '127.0.0.1');
