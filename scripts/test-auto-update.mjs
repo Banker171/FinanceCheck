@@ -118,6 +118,7 @@ try {
   assert.equal(await page.evaluate(() => window.financecheckDesktop.getVersion()), version, 'Cancel must leave current app running');
   await application.evaluate(({ dialog }) => { dialog.showMessageBox = async () => ({ response: 1 }); });
   phase = 'install and observe Windows-shell restart';
+  const quittingPid = application.process().pid;
   const closed = application.waitForEvent('close', { timeout: 45000 });
   void page.evaluate(() => window.financecheckDesktop.installUpdate()).catch(() => {});
   await closed; application = undefined;
@@ -127,14 +128,19 @@ try {
       db = new DatabaseSync(join(dataDirectory, 'financecheck.sqlite'), { readOnly: true });
       if (JSON.parse(db.prepare('SELECT body FROM state WHERE id=1').get().body).appVersion !== targetVersion) return null;
     } catch { return null; } finally { db?.close(); }
-    const script = "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $env:FINANCECHECK_AUTO_TEST_EXE -and $_.CommandLine -notmatch '--type=' } | ForEach-Object { $p = Get-Process -Id $_.ProcessId; if ($p.MainWindowHandle -ne 0) { $p.Id } } | ConvertTo-Json -Compress";
+    // The shell may use a different Windows desktop. Verify the actual main
+    // process instead of a desktop-local MainWindowHandle; the updated GUI is
+    // opened and checked through Playwright immediately afterwards.
+    const script = "$expected = [IO.Path]::GetFullPath($env:FINANCECHECK_AUTO_TEST_EXE); Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and [IO.Path]::GetFullPath($_.ExecutablePath) -eq $expected -and $_.CommandLine -notmatch '--type=' -and $_.CommandLine -match '--updated' } | Select-Object -ExpandProperty ProcessId | ConvertTo-Json -Compress";
     const { stdout } = await execFileAsync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], { env: { ...process.env, FINANCECHECK_AUTO_TEST_EXE: join(installDirectory, 'FinanceCheck.exe') } });
     if (!stdout.trim()) return null;
     const pids = JSON.parse(stdout); return Array.isArray(pids) ? pids[0] : pids;
-  }, 'new version with an actual visible Windows window');
-  assert.ok(Number.isInteger(observed) && observed > 0 && observed !== process.pid);
+  }, 'new version and the actual Windows-shell restarted main process');
+  assert.ok(Number.isInteger(observed) && observed > 0 && observed !== process.pid && observed !== quittingPid);
   restartedPid = observed;
-  await execFileAsync('powershell', ['-NoProfile', '-NonInteractive', '-Command', '$p = Get-Process -Id $env:FINANCECHECK_AUTO_TEST_PID; $null = $p.CloseMainWindow(); if (-not $p.WaitForExit(10000)) { throw "Test window did not close" }'], { env: { ...process.env, FINANCECHECK_AUTO_TEST_PID: String(restartedPid) } });
+  // End only the verified, disposable test process before reattaching the GUI
+  // driver in the runner's own desktop. SQLite persistence is checked below.
+  await run('taskkill', ['/PID', String(restartedPid), '/T', '/F']);
   restartedPid = undefined;
   phase = 'verify preserved data and credentials';
   page = await launch();
