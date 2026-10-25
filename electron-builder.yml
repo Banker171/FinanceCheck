@@ -1,0 +1,43 @@
+appId: com.financecheck.desktop
+productName: FinanceCheck
+copyright: Copyright © 2026 FinanceCheck
+directories:
+  output: release
+  buildResources: build
+files:
+  - dist/**/*
+  - server/**/*
+  - desktop/**/*
+  - build/icon.png
+  - package.json
+  - README.md
+  - docs/**/*
+  - '!**/.env*'
+  - '!**/data/**'
+asar: true
+compression: maximum
+npmRebuild: false
+toolsets:
+  wine: 1.0.1
+win:
+  icon: build/icon.ico
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: portable
+      arch: [x64]
+  artifactName: FinanceCheck-${version}-${arch}-setup.${ext}
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: FinanceCheck
+  uninstallDisplayName: FinanceCheck
+  deleteAppDataOnUninstall: false
+  installerLanguages: [ru_RU, en_US]
+  language: 1049
+portable:
+  artifactName: FinanceCheck-${version}-${arch}-portable.${ext}
+publish: null
