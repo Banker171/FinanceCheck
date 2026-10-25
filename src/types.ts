@@ -5,6 +5,7 @@ export type Projection = { strategy: string; debtFreeMonth: number | null; reser
 export type Analysis = { today: string; currentMonth: string; plannedIncome: number | null; totalBalance: number; debtTotal: number; minimumPayments: number; surplus: number | null; spendable: number; reserveTarget: number; reserveDays: number | null; monthIncome: number; monthExpense: number; nextIncome: string | null; daysUntilIncome: number | null; beforeIncome: number; available: number; dailyBudget: number | null; categories: Record<string, number>; events: { id: string; date: string; title: string; amount: number; type: string; overdue?: boolean }[]; scenarios: Projection[]; forecast: Projection; warnings: string[] };
 export type State = { schemaVersion: number; monthlyPlans: Record<string, { income: number; payday: number }>; profile: Profile; debts: Debt[]; transactions: Transaction[]; analysis: Analysis; ai: { enabled: boolean; model: string | null; desktop?: boolean } };
 export type DesktopSettings = { configured: boolean; model: string; encryptionAvailable: boolean };
+export type UpdateState = { supported: boolean; currentVersion: string; status: 'unsupported' | 'idle' | 'checking' | 'available' | 'downloading' | 'ready' | 'installing' | 'current' | 'error'; availableVersion: string | null; percent: number; lastChecked: string | null; error: string; unavailableReason: string };
 declare global {
   interface Window {
     financecheckDesktop?: {
@@ -12,6 +13,9 @@ declare global {
       saveSettings: (input: { key?: string; model: string; removeKey?: boolean }) => Promise<DesktopSettings>;
       openDataFolder: () => Promise<void>;
       getVersion: () => Promise<string>;
+      getUpdateState: () => Promise<UpdateState>;
+      checkForUpdates: () => Promise<UpdateState>;
+      installUpdate: () => Promise<UpdateState>;
     };
   }
 }

@@ -2,13 +2,13 @@
 // It uses an isolated data directory; never run this against a user's installation.
 import { _electron as electron } from '@playwright/test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, readdirSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 
-if (process.platform !== 'win32') throw Error('The installation-upgrade test must run on the disposable Windows CI runner.');
+if (process.platform !== 'win32' || process.env.GITHUB_ACTIONS !== 'true') throw Error('The installation-upgrade test must run on the disposable Windows CI runner.');
 const directory = mkdtempSync(join(tmpdir(), 'financecheck-upgrade-'));
 const installDirectory = join(directory, 'installed');
 const dataDirectory = join(directory, 'user-data');
@@ -82,5 +82,10 @@ try {
   console.log('Windows upgrade PASS: actual 0.2.0 installation updated in place; profile, balances, debts, payments and DPAPI key preserved; original snapshot recoverable; migration runs once.');
 } finally {
   if (application) await close();
+  const uninstaller = existsSync(installDirectory) ? readdirSync(installDirectory).find(name => /^Uninstall.*\.exe$/i.test(name)) : null;
+  if (uninstaller) await new Promise((resolve, reject) => {
+    const child = spawn(join(installDirectory, uninstaller), ['/S', '_?=' + installDirectory], { stdio: 'inherit' });
+    child.once('error', reject); child.once('exit', code => code === 0 ? resolve() : reject(Error('Uninstaller exit: ' + code)));
+  });
   rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 });
 }

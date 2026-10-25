@@ -1,0 +1,27 @@
+import assert from 'node:assert/strict';
+import { readFileSync, statSync, createReadStream, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { parseUpdateInfo } from 'electron-updater/out/providers/Provider.js';
+
+const version = JSON.parse(readFileSync('package.json', 'utf8')).version;
+const feed = 'https://github.com/Banker171/FinanceCheck/releases/latest/download/';
+const config = parseUpdateInfo(readFileSync('release/win-unpacked/resources/app-update.yml', 'utf8'), 'app-update.yml', feed);
+assert.equal(config.provider, 'generic');
+assert.equal(config.url, feed);
+assert.equal(config.token, undefined, 'Do not distribute GitHub credentials');
+const info = parseUpdateInfo(readFileSync('release/latest.yml', 'utf8'), 'latest.yml', feed);
+assert.equal(info.version, version);
+assert.equal(info.files.length, 1, 'Only the installed-app installer belongs in update metadata');
+const filename = `FinanceCheck-${version}-x64-setup.exe`;
+assert.equal(info.files[0].url, filename);
+assert.equal(info.path, filename);
+const path = join('release', filename);
+const hash = createHash('sha512');
+for await (const chunk of createReadStream(path)) hash.update(chunk);
+const checksum = hash.digest('base64');
+assert.equal(info.files[0].sha512, checksum);
+assert.equal(info.sha512, checksum);
+assert.equal(info.files[0].size, statSync(path).size);
+assert.ok(existsSync(path + '.blockmap'));
+console.log('Update artifacts PASS: packaged HTTPS feed, version, installer selection, size, SHA512 and blockmap.');

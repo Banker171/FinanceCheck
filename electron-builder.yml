@@ -40,4 +40,7 @@ nsis:
   language: 1049
 portable:
   artifactName: FinanceCheck-${version}-${arch}-portable.${ext}
-publish: null
+publish:
+  provider: generic
+  url: https://github.com/Banker171/FinanceCheck/releases/latest/download/
+  useMultipleRangeRequest: false

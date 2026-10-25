@@ -1,6 +1,6 @@
 {
   "name": "financecheck",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -15,9 +15,11 @@
     "dist:dir": "npm run build && electron-builder --dir --publish never",
     "test:desktop": "node --test tests/desktop.test.mjs",
     "test:electron": "npm run build && node scripts/test-electron.mjs",
-    "test:upgrade": "node scripts/test-upgrade.mjs"
+    "test:upgrade": "node scripts/test-upgrade.mjs",
+    "test:auto-update": "node scripts/test-auto-update.mjs"
   },
   "dependencies": {
+    "electron-updater": "^6.8.11",
     "express": "^5.1.0",
     "lucide-react": "^0.468.0",
     "react": "^19.1.0",

@@ -21,6 +21,9 @@ try {
   assert.ok(await page.getByText('Данные на этом устройстве', { exact: true }).isVisible());
   const settings = await page.evaluate(() => window.financecheckDesktop.getSettings());
   assert.equal(settings.configured, false);
+  const updateState = await page.evaluate(() => window.financecheckDesktop.getUpdateState());
+  assert.equal(updateState.status, 'unsupported');
+  assert.equal(updateState.supported, false);
   const origin = new URL(page.url()).origin;
   const outsideResponse = await fetch(origin + '/api/state');
   assert.equal(outsideResponse.status, 401);
@@ -39,6 +42,7 @@ try {
   assert.equal(saved.data.profile.name, 'Проверка Windows');
   await page.getByRole('button', { name: 'Настройки', exact: true }).click();
   await page.getByRole('heading', { name: 'Подключение ИИ', exact: true }).waitFor();
+  await page.getByRole('heading', { name: 'Обновления программы', exact: true }).waitFor();
   await page.reload();
   await page.getByRole('heading', { level: 1 }).waitFor();
   assert.match(await page.getByRole('heading', { level: 1 }).innerText(), /Проверка Windows/);

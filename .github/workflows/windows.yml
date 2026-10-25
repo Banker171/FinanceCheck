@@ -22,8 +22,13 @@ jobs:
       - run: npm run dist:win
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Verify published update metadata and installer integrity
+        run: node scripts/check-update-artifacts.mjs
       - name: Verify installation upgrade preserves existing data
         run: npm run test:upgrade
+      - name: Verify built-in download, integrity rejection and automatic installation
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        run: npm run test:auto-update
       - name: Checksums
         shell: pwsh
         run: |
@@ -33,6 +38,8 @@ jobs:
           name: FinanceCheck-Windows-x64
           path: |
             release/*.exe
+            release/*.blockmap
+            release/latest.yml
             release/SHA256SUMS.txt
           if-no-files-found: error
   release:
@@ -52,6 +59,6 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: >-
-          gh release create "$RELEASE_TAG" release/*.exe release/SHA256SUMS.txt
+          gh release create "$RELEASE_TAG" release/*.exe release/*.blockmap release/latest.yml release/SHA256SUMS.txt
           --title "FinanceCheck $RELEASE_TAG — Windows"
           --notes "Windows 10/11 x64. Use the setup executable to install, or portable to run without installation. All core functions work offline. User data is saved separately in your Windows profile. This release is unsigned; Windows may show an unknown-publisher warning. Optional external AI requires your own API key and consent."
