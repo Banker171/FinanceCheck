@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { extractFile } from '@electron/asar';
 
 if (process.platform !== 'win32' || process.env.GITHUB_ACTIONS !== 'true') throw Error('Use the disposable Windows CI runner for automatic-installation tests.');
 const directory = mkdtempSync(join(tmpdir(), 'financecheck-auto-update-'));
@@ -26,6 +27,7 @@ const targetVersion = parts.join('.');
 const filename = `FinanceCheck-${targetVersion}-x64-setup.exe`;
 let application, server, restartedPid;
 let phase = 'build fixture';
+let appLog = '';
 const execFileAsync = promisify(execFile);
 function run(executable, args, env = process.env) {
   return new Promise((resolve, reject) => {
@@ -68,6 +70,7 @@ try {
   await run(resolve(`release/FinanceCheck-${version}-x64-setup.exe`), ['/S', '/D=' + installDirectory]);
   async function launch() {
     application = await electron.launch({ executablePath: join(installDirectory, 'FinanceCheck.exe'), args: [], env, timeout: 45000 });
+    for (const stream of [application.process().stdout, application.process().stderr]) stream?.on('data', chunk => { appLog = (appLog + chunk.toString()).slice(-16000); });
     const page = await application.firstWindow(); await page.getByRole('heading', { level: 1 }).waitFor(); return page;
   }
   let page = await launch();
@@ -146,7 +149,14 @@ try {
   assert.ok(backups.some(name => name.includes('before-upgrade')));
   console.log(`Windows automatic update PASS: ${version} -> ${targetVersion}, real downloaded installer, canceled confirmation respected, restart observed, all financial data and DPAPI key preserved.`);
 } catch (error) {
-  const details = `${phase}: ${error.stack || error}`.replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A');
+  const diagnostic = {};
+  try { diagnostic.installedVersion = JSON.parse(extractFile(join(installDirectory, 'resources', 'app.asar'), 'package.json').toString()).version; } catch {}
+  let db;
+  try { db = new DatabaseSync(join(dataDirectory, 'financecheck.sqlite'), { readOnly: true }); diagnostic.dataVersion = JSON.parse(db.prepare('SELECT body FROM state WHERE id=1').get().body).appVersion; } catch {} finally { db?.close(); }
+  try {
+    diagnostic.windows = (await execFileAsync('powershell', ['-NoProfile', '-NonInteractive', '-Command', '$p = Get-CimInstance Win32_Process | Where-Object { $_.Name -eq "FinanceCheck.exe" } | Select-Object ProcessId,ExecutablePath,CommandLine; $r = Get-ItemProperty HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\* | Where-Object { $_.DisplayName -like "FinanceCheck*" } | Select-Object DisplayVersion,InstallLocation; @{Processes=$p;Installations=$r} | ConvertTo-Json -Depth 4 -Compress'])).stdout;
+  } catch {}
+  const details = `${phase}: ${error.stack || error}\nDiagnostics: ${JSON.stringify(diagnostic)}\nUpdater log: ${appLog}`.replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A');
   console.error('::error title=Automatic update validation::' + details);
   throw error;
 } finally {
